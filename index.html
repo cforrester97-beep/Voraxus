@@ -449,6 +449,16 @@
       opacity: 0.65;
     }
 
+    /* Phased out or temporarily exiled — the card stays in the list but
+       is clearly marked as not really on the battlefield. */
+    .attack-tag.away {
+      background-color: transparent;
+      border: 1px solid var(--accent-gold);
+      color: var(--text-color);
+      font-style: italic;
+      opacity: 0.9;
+    }
+
     /* Stun counters: the creature is tapped and will skip that many
        untap steps before it comes back. */
     .attack-tag.stun {
@@ -625,6 +635,73 @@
         55%  { opacity: 0.6;  transform: translate(-50%, -50%) scale(1.12); }
         100% { opacity: 0;    transform: translate(-50%, -50%) scale(1.35); }
       }
+    }
+
+    /* Graveyard / exile counts in the status bar are buttons, but should
+       read as part of the row rather than standing out as controls. */
+    .status-zone {
+      font: inherit;
+      color: inherit;
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      border-bottom: 1px dotted var(--accent-gold);
+    }
+
+    #zoneDialog {
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+
+    .zone-list {
+      list-style: none;
+      margin: 10px 0;
+      padding: 0;
+      text-align: left;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .zone-item {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 5px 2px;
+      border-bottom: 1px solid var(--button-bg);
+      font-size: 0.9em;
+    }
+
+    .zone-item:last-child {
+      border-bottom: none;
+    }
+
+    .zone-kind {
+      flex: 0 0 auto;
+      min-width: 5.5em;
+      font-size: 0.8em;
+      opacity: 0.7;
+    }
+
+    .zone-name {
+      flex: 1 1 auto;
+    }
+
+    .zone-count {
+      flex: 0 0 auto;
+      font-weight: bold;
+      color: var(--accent-gold);
+    }
+
+    /* Heading shown above a submenu's buttons, so it's obvious the
+       action row has been swapped rather than replaced permanently. */
+    .submenu-title {
+      width: 100%;
+      margin-bottom: 8px;
+      font-family: var(--font-display);
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: var(--accent-gold);
     }
 
     /* Actions container: no fixed box styling, buttons wrap and stay centered */
@@ -1129,9 +1206,21 @@
     <p id="removalDialogMessage"></p>
     <div class="dialog-buttons dialog-buttons-stacked">
       <button type="button" class="button button-accent" id="removalBounceBtn">Bounce to hand</button>
-      <button type="button" class="button" id="removalDestroyBtn">Destroy / Exile</button>
+      <button type="button" class="button" id="removalDestroyBtn">Destroy (to graveyard)</button>
+      <button type="button" class="button" id="removalExileBtn">Exile</button>
+      <button type="button" class="button" id="removalPhaseBtn">Phase out (returns as-is)</button>
+      <button type="button" class="button" id="removalExileTempBtn">Exile temporarily (returns reset)</button>
       <button type="button" class="button" id="removalStunBtn">Add stun counter</button>
       <button type="button" class="button" id="removalCancelBtn">Cancel</button>
+    </div>
+  </dialog>
+
+  <!-- Browsing Voraxus's graveyard or exile pile. -->
+  <dialog id="zoneDialog" class="game-dialog" aria-label="Zone contents">
+    <h2 id="zoneDialogTitle"></h2>
+    <div id="zoneDialogList"></div>
+    <div class="dialog-buttons">
+      <button type="button" class="button button-accent" id="zoneCloseBtn">Close</button>
     </div>
   </dialog>
 
@@ -2310,6 +2399,8 @@
       creatures: [],
       artifactsAndEnchantments: [],
       bouncedCards: [],
+      graveyard: [],
+      exileZone: [],
       commander: null,
       maxHandSizeOverride: null,
       voraxusColors: [],
@@ -2895,7 +2986,7 @@
     let numberDialog, numberDialogMessage, numberDialogInput;
     let numberDialogMinus, numberDialogPlus, numberDialogCancel, numberDialogOk;
     let confirmDialog, confirmDialogMessage, confirmCancelBtn, confirmOkBtn;
-    let removalDialog, removalDialogMessage, removalBounceBtn, removalDestroyBtn, removalStunBtn, removalCancelBtn;
+    let removalDialog, removalDialogMessage, removalBounceBtn, removalDestroyBtn, removalExileBtn, removalPhaseBtn, removalExileTempBtn, removalStunBtn, removalCancelBtn;
     let giveCreatureDialog, giveCreaturePower, giveCreatureToughness, giveCreatureAbility, giveCreatureType;
     let giveCreatureCancelBtn, giveCreatureOkBtn;
 
@@ -3052,20 +3143,24 @@
     /** Three-way version of showConfirmDialog, for deciding what an
         opponent's removal actually did to one of Voraxus's permanents.
         Resolves to "bounce", "destroy", or "cancel". */
-    function showRemovalDialog(message) {
+    function showRemovalDialog(message, { hideTempExile = false } = {}) {
       return new Promise(resolve => {
         removalDialogMessage.textContent = message;
+        removalExileTempBtn.style.display = hideTempExile ? "none" : "";
 
         function onClose() {
           removalDialog.removeEventListener("close", onClose);
           const value = removalDialog.returnValue;
-          const valid = ["bounce", "destroy", "stun"];
+          const valid = ["bounce", "destroy", "exile", "phase", "exiletemp", "stun"];
           resolve(valid.includes(value) ? value : "cancel");
         }
 
         removalDialog.addEventListener("close", onClose);
         removalBounceBtn.onclick = () => removalDialog.close("bounce");
         removalDestroyBtn.onclick = () => removalDialog.close("destroy");
+        removalExileBtn.onclick = () => removalDialog.close("exile");
+        removalPhaseBtn.onclick = () => removalDialog.close("phase");
+        removalExileTempBtn.onclick = () => removalDialog.close("exiletemp");
         removalStunBtn.onclick = () => removalDialog.close("stun");
         removalCancelBtn.onclick = () => removalDialog.close("cancel");
 
@@ -3116,7 +3211,11 @@
       F: "Damage (creature/PW)", G: "Damage (player)", H: "Counter",
       I: "Exile graveyards", J: "Summon (small)", K: "Summon (large)",
       L: "Draw cards", M: "Force discard", N: "Heal", O: "Empower creature",
-      P: "Cast artifact", Q: "Cast enchantment", CMD: "Cast commander"
+      P: "Cast artifact", Q: "Cast enchantment", CMD: "Cast commander",
+      // Instant-speed responses, tallied separately from the same
+      // effects cast on Voraxus's own turn.
+      RD: "Response: destroy", RE: "Response: exile", RF: "Response: damage",
+      RJ: "Response: flash creature", RO: "Response: pump", RB: "Response: bounce"
     };
 
     /** Builds a small inline SVG line chart from the life-total history —
@@ -3164,6 +3263,101 @@
       document.getElementById("statsSparkline").innerHTML = buildLifeSparklineSVG(gameState.lifeHistory);
       document.getElementById("statsTallyList").innerHTML = buildActionTallyHTML(gameState.actionTally);
       document.getElementById("statsDialog").showModal();
+    }
+
+    /** Lists what's in Voraxus's graveyard or exile pile, newest first
+        so the most recent card is at the top — the one usually being
+        asked about. Cards are grouped and counted, since a deck racks up
+        plenty of duplicates over a long game and a raw list of forty
+        identical lines is harder to read than "Destroy x7". */
+    function showZoneDialog(zone) {
+      const isGraveyard = zone === "graveyard";
+      const cards = isGraveyard ? gameState.graveyard : gameState.exileZone;
+      document.getElementById("zoneDialogTitle").textContent =
+        `${gameState.botName}'s ${isGraveyard ? "Graveyard" : "Exile"} (${cards.length})`;
+
+      const list = document.getElementById("zoneDialogList");
+      if (cards.length === 0) {
+        list.innerHTML = `<p>Nothing here yet.</p>`;
+        document.getElementById("zoneDialog").showModal();
+        return;
+      }
+
+      const counts = new Map();
+      [...cards].reverse().forEach(c => {
+        const key = `${c.kind}\u0000${c.name}`;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      });
+      const rows = [...counts.entries()].map(([key, n]) => {
+        const [kind, name] = key.split("\u0000");
+        return `<li class="zone-item"><span class="zone-kind">${kind}</span>` +
+          `<span class="zone-name">${name}</span>` +
+          (n > 1 ? `<span class="zone-count">&times;${n}</span>` : "") + `</li>`;
+      }).join("");
+      list.innerHTML = `<ul class="zone-list">${rows}</ul>`;
+      document.getElementById("zoneDialog").showModal();
+    }
+
+    /** Returns a phased-out or temporarily exiled permanent to normal.
+
+        PHASED (rule 702.26) — it phases back in as the same object:
+        buffs, counters and tapped status all preserved, nothing
+        recalculated.
+
+        EXILED TEMPORARILY — it comes back as a NEW object, so
+        accumulated buffs are gone and it rebuilds from its printed
+        stats. Standing anthems reapply, because from their point of
+        view a fresh creature just entered. It arrives untapped and
+        summoning sick, counters and combat assignment cleared. */
+    function restorePermanentState(creature, announce) {
+      const phased = creature.zoneState === "phased";
+
+      if (!phased) {
+        const baseP = creature.basePower != null ? creature.basePower : creature.power;
+        const baseT = creature.baseToughness != null ? creature.baseToughness : creature.toughness;
+        const baseA = creature.baseAbilities ? [...creature.baseAbilities] : [...(creature.abilities || [])];
+
+        const bonus = getCreatureEntryBonus();
+        creature.power = baseP + bonus.power;
+        creature.toughness = baseT + bonus.toughness;
+        creature.abilities = baseA;
+        bonus.abilities.forEach(a => { if (!creature.abilities.includes(a)) creature.abilities.push(a); });
+        creature.description = `${creature.power}/${creature.toughness} creature`;
+        creature.hasHaste = creature.abilities.includes("Haste");
+
+        creature.summonedThisTurn = true;
+        creature.tapped = false;
+        creature.attackTarget = null;
+        creature.stunCounters = 0;
+      }
+
+      creature.zoneState = null;
+      if (announce) {
+        logMessage(phased
+          ? `${creature.description} phases back in, exactly as it left${creature.tapped ? " (still tapped)" : ""}.`
+          : `${creature.description} returns from exile as a new creature.`);
+      }
+      if (!phased) firePermanentTrigger("creatureCast");
+    }
+
+    /** Phased permanents come back on their own at the start of
+        Voraxus's next turn, the same way stun counters tick down — it's
+        a timed effect, not one waiting on a condition. Temporary exile
+        is left alone, since that's the one waiting for something. */
+    function phaseInAtUntap() {
+      const returning = gameState.creatures.filter(c => c.zoneState === "phased");
+      returning.forEach(c => restorePermanentState(c, false));
+      gameState.artifactsAndEnchantments.forEach(p => {
+        if (p.zoneState === "phased") p.zoneState = null;
+      });
+      if (returning.length > 0) {
+        logMessage(`${returning.length} phased permanent${returning.length === 1 ? "" : "s"} phase${returning.length === 1 ? "s" : ""} back in.`);
+      }
+    }
+
+    function setUpZoneDialog() {
+      document.getElementById("zoneCloseBtn").onclick =
+        () => document.getElementById("zoneDialog").close();
     }
 
     function setUpStatsDialog() {
@@ -3535,8 +3729,43 @@
       return true;
     }
 
-    function spendCard() {
+    /* Branches whose card ends up on the BATTLEFIELD rather than in the
+       graveyard: casting a creature, artifact or enchantment puts the
+       card into play, so it's only filed in a zone later, when that
+       permanent actually leaves. Every other action is a spell that
+       resolves straight to the graveyard. */
+    const PERMANENT_CAST_BRANCHES = ["J", "K", "P", "Q", "CMD"];
+
+    /** Spends the card an action costs. Non-permanent spells resolve to
+        the graveyard; permanents are tracked on the battlefield instead
+        and filed when they leave. */
+    function spendCard(branch) {
       gameState.voraxusCards = Math.max(0, gameState.voraxusCards - 1);
+      if (!branch || PERMANENT_CAST_BRANCHES.includes(branch)) return;
+      const label = ACTION_NAMES[branch] || "Spell";
+      gameState.graveyard.push({ name: label, kind: "Spell" });
+    }
+
+    /** Files a permanent that has left the battlefield. Tokens simply
+        cease to exist (they're the ones added by hand for the table's
+        own effects), so they're never filed anywhere. */
+    function filePermanent(entry, zone) {
+      if (!entry || entry.isToken) return;
+      const record = { name: entry.name, kind: entry.kind };
+      if (zone === "exile") gameState.exileZone.push(record);
+      else gameState.graveyard.push(record);
+    }
+
+    /** Describes a creature for the zone lists. */
+    function creatureZoneEntry(creature) {
+      const abilities = (creature.abilities || []).length
+        ? ` (${joinAbilitiesForDisplay(creature.abilities)})`
+        : "";
+      return {
+        name: `${creature.power}/${creature.toughness} creature${abilities}`,
+        kind: "Creature",
+        isToken: !!creature.isToken
+      };
     }
 
     function finalizeNewCreatures() {
@@ -3554,6 +3783,9 @@
     /** A creature can attack if it isn't summoning sick (or has Haste)
         and isn't already tapped. */
     function creatureCanAttack(creature) {
+      // Phased out or temporarily exiled: not on the battlefield in any
+      // meaningful sense, so it can't be declared as an attacker.
+      if (creature.zoneState) return false;
       if (creature.tapped) return false;
       return !creature.summonedThisTurn || creature.hasHaste;
     }
@@ -3668,7 +3900,12 @@
       const abilities = [...rolled.abilities];
       bonus.abilities.forEach(a => { if (!abilities.includes(a)) abilities.push(a); });
 
-      const hasteFlag = abilities.includes("Haste") ? true : Math.random() < 0.2;
+      // Haste comes from the keyword and nothing else. This used to
+      // also roll a hidden 20% chance for creatures without it, left
+      // over from before Haste was a printed ability — which meant
+      // roughly one creature in five could attack the turn it arrived
+      // while its card showed no Haste at all.
+      const hasteFlag = abilities.includes("Haste");
       gameState.creatures.push({
         id: nextCreatureId++,
         power: power,
@@ -3683,6 +3920,13 @@
         colors: rolled.colors,
         manaCost: manaCost,
         sizeTier: rolled.sizeTier,
+        // The printed values, before any anthem bonus or later buffs.
+        // Exiling a creature and returning it makes a NEW object that
+        // loses accumulated buffs, so it's rebuilt from these — whereas
+        // phasing preserves the creature exactly as it stands.
+        basePower: rolled.power,
+        baseToughness: rolled.toughness,
+        baseAbilities: [...rolled.abilities],
         iconId: pickRandom(CREATURE_ICON_IDS)
       });
       gameState.voraxusCreatureCount = gameState.creatures.length;
@@ -3717,7 +3961,17 @@
         descriptions read "3/4 creature", so a wipe never actually
         removed anything. Indestructible is likewise read from the
         abilities array rather than sniffed out of the description. */
-    function removeCreaturesByType(targetTypes, effect) {
+    /** Removes Voraxus's own permanents matching targetTypes and files
+        them in the right zone. `destination` is "graveyard", "exile" or
+        "hand": destroy and sacrifice go to the graveyard, exile to the
+        exile pile, and bounce back to hand. Only Destroy respects
+        Indestructible (rule 702.12b), so that's flagged separately
+        rather than inferred from the destination.
+
+        Everything in gameState.creatures IS a creature, so this checks
+        the type list directly rather than substring-matching each
+        creature's description text. */
+    function removeCreaturesByType(targetTypes, destination, respectIndestructible) {
       const types = Array.isArray(targetTypes) ? targetTypes : [targetTypes];
       const hitsCreatures = types.some(t => String(t).toLowerCase() === "creature");
       const before = gameState.creatures.length;
@@ -3727,17 +3981,28 @@
         // The commander is pulled out first so a wipe sends it to the
         // command zone (rule 903.9) rather than removing it outright.
         commanderHit = gameState.creatures.some(c => c.isCommander);
-        gameState.creatures = gameState.creatures.filter(c => {
-          if (c.isCommander) return true;
-          // effect 0 is Destroy, the only one Indestructible stops
-          // (rule 702.12b); sacrifice, bounce and exile all bypass it.
-          const isProtected = effect === 0 && (c.abilities || []).includes("Indestructible");
-          return isProtected;
+        const survivors = [];
+        gameState.creatures.forEach(c => {
+          if (c.isCommander) { survivors.push(c); return; }
+          if (respectIndestructible && (c.abilities || []).includes("Indestructible")) {
+            survivors.push(c);
+            return;
+          }
+          // Bounced permanents go back to hand, not to a zone pile.
+          if (destination === "hand") gameState.voraxusCards++;
+          else filePermanent(creatureZoneEntry(c), destination);
         });
+        gameState.creatures = survivors;
         gameState.voraxusCreatureCount = gameState.creatures.length;
       }
 
-      gameState.artifactsAndEnchantments = gameState.artifactsAndEnchantments.filter(item => !types.includes(item.type));
+      const keptPermanents = [];
+      gameState.artifactsAndEnchantments.forEach(item => {
+        if (!types.includes(item.type)) { keptPermanents.push(item); return; }
+        if (destination === "hand") gameState.voraxusCards++;
+        else filePermanent({ name: item.name, kind: item.type }, destination);
+      });
+      gameState.artifactsAndEnchantments = keptPermanents;
 
       let removed = before - gameState.creatures.length;
       if (commanderHit) {
@@ -3777,9 +4042,16 @@
           <span class="status-stat" title="Mana"><span class="stat-icon" aria-hidden="true">&#128167;</span>${gameState.voraxusCurrentMana}/${gameState.voraxusTotalMana}</span>
           <span class="status-stat" title="Creatures"><span class="stat-icon" aria-hidden="true">&#128009;</span>${gameState.voraxusCreatureCount}</span>
           <span class="status-stat" title="Artifacts &amp; enchantments"><span class="stat-icon" aria-hidden="true">&#128274;</span>${gameState.artifactsAndEnchantments.length}</span>
+          <button type="button" class="status-stat status-zone" id="graveyardStat" title="Graveyard — tap to look through"><span class="stat-icon" aria-hidden="true">&#9760;</span>${gameState.graveyard.length}</button>
+          <button type="button" class="status-stat status-zone" id="exileStat" title="Exile — tap to look through"><span class="stat-icon" aria-hidden="true">&#10006;</span>${gameState.exileZone.length}</button>
           ${getColorStripesHTML()}
         </div>
       `;
+      const gyBtn = document.getElementById("graveyardStat");
+      if (gyBtn) gyBtn.onclick = () => showZoneDialog("graveyard");
+      const exBtn = document.getElementById("exileStat");
+      if (exBtn) exBtn.onclick = () => showZoneDialog("exile");
+
       updateCommandZoneDisplay();
       updateCreaturesDisplay();
       updateArtifactsDisplay();
@@ -3827,6 +4099,15 @@
         a creature apart as new-this-turn vs. an older one, now that
         they all share a single list — no separate box needed for that. */
     function getAttackStatusHTML(creature) {
+      // Phased out or temporarily exiled: the card stays visible but is
+      // clearly marked, and nothing else about its combat status
+      // matters while it's away.
+      if (creature.zoneState === "phased") {
+        return `<span class="attack-tag away">Phased out &mdash; returns next turn</span>`;
+      }
+      if (creature.zoneState === "exiled") {
+        return `<span class="attack-tag away">Exiled &mdash; tap to return</span>`;
+      }
       const stun = creature.stunCounters > 0
         ? `<span class="attack-tag stun">Stun &times;${creature.stunCounters}</span>`
         : "";
@@ -3903,6 +4184,9 @@
           const def = findPermanentDefinition(item.name);
           const icon = item.type === "Artifact" ? "&#9881;" : "&#10024;";
           const cost = item.manaCost != null ? item.manaCost : (def ? def.cost : "?");
+          const away = item.zoneState
+            ? ` <span class="attack-tag away">${item.zoneState === "phased" ? "Phased out" : "Exiled"}</span>`
+            : "";
           const manual = def && def.trigger === "reminder"
             ? ` <span class="permanent-manual">(track manually)</span>`
             : "";
@@ -3910,7 +4194,7 @@
           return `<li class="permanent-item" data-id="${item.id}">` +
             `<span class="permanent-icon" aria-hidden="true">${icon}</span>` +
             `<span class="permanent-text"><strong>${item.name}</strong> ` +
-            `<span class="permanent-cost">${cost}</span>${manual}<br>` +
+            `<span class="permanent-cost">${cost}</span>${manual}${away}<br>` +
             `<span class="permanent-type">${item.type}</span><br>${effect}</span></li>`;
         })
         .join("");
@@ -3993,6 +4277,8 @@
         gameState.voraxusCreatureCount = 0;
         gameState.artifactsAndEnchantments = [];
         gameState.bouncedCards = [];
+        gameState.graveyard = [];
+        gameState.exileZone = [];
         gameState.maxHandSizeOverride = null;
         nextCreatureId = 1;
         nextPermanentId = 1;
@@ -4041,6 +4327,8 @@
         if (!Number.isInteger(gameState.voraxusLibrary)) gameState.voraxusLibrary = 100;
         if (!Array.isArray(gameState.artifactsAndEnchantments)) gameState.artifactsAndEnchantments = [];
         if (!Array.isArray(gameState.bouncedCards)) gameState.bouncedCards = [];
+        if (!Array.isArray(gameState.graveyard)) gameState.graveyard = [];
+        if (!Array.isArray(gameState.exileZone)) gameState.exileZone = [];
         if (!gameState.commander) gameState.commander = buildCommander();
         if (gameState.maxHandSizeOverride === undefined) gameState.maxHandSizeOverride = null;
         recalculateNextCreatureId();
@@ -4314,7 +4602,7 @@
         pushUndoSnapshot();
         gameState.voraxusCurrentMana -= cost;
         putCommanderOntoBattlefield();
-        spendCard();
+        spendCard("CMD");
         gameState.actionTally.CMD = (gameState.actionTally.CMD || 0) + 1;
         playMonsterRoar();
         triggerScreenShake();
@@ -4360,8 +4648,8 @@
           if (checkAndDeductMana(manaCost)) {
             resolveAction(branch);
             logVoraxusAction(buffer);
-            if (!outcome.oneSided) removeCreaturesByType(types, 0);
-            spendCard();
+            if (!outcome.oneSided) removeCreaturesByType(types, "graveyard", true);
+            spendCard(branch);
             updateStatus();
           }
           return;
@@ -4403,8 +4691,8 @@
             if (checkAndDeductMana(manaCost)) {
               resolveAction(branch);
               logVoraxusAction(buffer);
-              if (!outcome.oneSided) removeCreaturesByType(types, 1);
-              spendCard();
+              if (!outcome.oneSided) removeCreaturesByType(types, "graveyard", false);
+              spendCard(branch);
               updateStatus();
             }
             return;
@@ -4426,8 +4714,8 @@
           if (checkAndDeductMana(manaCost)) {
             resolveAction(branch);
             logVoraxusAction(buffer);
-            if (!outcome.oneSided) removeCreaturesByType(types, 1);
-            spendCard();
+            if (!outcome.oneSided) removeCreaturesByType(types, "hand", false);
+            spendCard(branch);
             updateStatus();
           }
           return;
@@ -4448,8 +4736,8 @@
           if (checkAndDeductMana(manaCost)) {
             resolveAction(branch);
             logVoraxusAction(buffer);
-            if (!outcome.oneSided) removeCreaturesByType(types, 1);
-            spendCard();
+            if (!outcome.oneSided) removeCreaturesByType(types, "exile", false);
+            spendCard(branch);
             updateStatus();
           }
           return;
@@ -4507,7 +4795,14 @@
       else if (branch === "I") {
         manaCost = 3;
         if (!checkAndDeductMana(manaCost)) return;
-        buffer = `${gameState.botName} exiles all graveyards.`;
+        // Symmetric, so Voraxus's own graveyard empties into exile too.
+        const ownCards = gameState.graveyard.length;
+        if (ownCards > 0) {
+          gameState.exileZone.push(...gameState.graveyard);
+          gameState.graveyard = [];
+        }
+        buffer = `${gameState.botName} exiles all graveyards` +
+          (ownCards > 0 ? `, including its own ${ownCards} card(s)` : "") + ".";
       }
       // J: small creature. If an opponent previously bounced a small
       // creature back to Voraxus's hand, it recasts that exact card
@@ -4644,7 +4939,7 @@
 
       // "Does nothing" doesn't cost a card; every other outcome does.
       if (branch !== "A" || gameState.voraxusCards < 1) {
-        spendCard();
+        spendCard(branch);
       }
       updateStatus();
     }
@@ -4756,6 +5051,37 @@
       updateStatus();
     }
 
+    /** Life gain from an opponent's effect — the mirror of direct
+        damage. Recorded in the life history too, so the Stats sparkline
+        shows gains as well as losses. */
+    async function handleGiveLife() {
+      const amount = await showNumberPrompt(`How much life does ${gameState.botName} gain?`, { min: 0, defaultValue: 0 });
+      if (amount === null || isNaN(amount) || amount < 0) return;
+
+      pushUndoSnapshot();
+      gameState.voraxusLife += amount;
+      pushLifeHistory();
+      logMessage(`${gameState.botName} gains ${amount} life, and now has ${gameState.voraxusLife}.`);
+      updateStatus();
+    }
+
+    /** Sets Voraxus's life to an exact number, for the effects that say
+        so outright rather than dealing damage or granting life. */
+    async function handleSetLife() {
+      const amount = await showNumberPrompt(
+        `Set ${gameState.botName}'s life total (currently ${Math.max(0, gameState.voraxusLife)}):`,
+        { min: 0, defaultValue: Math.max(0, gameState.voraxusLife) }
+      );
+      if (amount === null || isNaN(amount) || amount < 0) return;
+
+      pushUndoSnapshot();
+      gameState.voraxusLife = amount;
+      pushLifeHistory();
+      logMessage(`${gameState.botName}'s life total is set to ${amount}.`);
+      checkVoraxusDefeat();
+      updateStatus();
+    }
+
     /** Voraxus's current maximum hand size, or null for no limit.
         An override set by an opponent's spell wins over the difficulty
         default; otherwise difficulties 1-3 cap at 7 and 4-5 have no
@@ -4787,6 +5113,66 @@
       pushUndoSnapshot();
       gameState.maxHandSizeOverride = value;
       logMessage(`${gameState.botName}'s maximum hand size is now ${value}. It applies at the end of its turn.`);
+      updateStatus();
+    }
+
+    /** Adds permanent mana sources — the equivalent of Voraxus searching
+        its library for basic lands and putting them onto the battlefield.
+        They arrive TAPPED, which is how most tutor-to-battlefield effects
+        work, so total capacity grows but this turn's available mana
+        doesn't. The sources come online at Voraxus's next untap step.
+        For the rarer effects that put a land in untapped and ready, add
+        the mana for this turn with "Add Mana (this turn only)" as well.
+
+        Because the cards genuinely come out of the library, the library
+        shrinks by the same amount (nudging it slightly closer to
+        decking out). */
+    async function handleAddManaSource() {
+      const amount = await showNumberPrompt(
+        `How many mana sources does ${gameState.botName} put onto the battlefield?`,
+        { min: 1, defaultValue: 1 }
+      );
+      if (amount === null || isNaN(amount) || amount <= 0) {
+        logMessage("No mana sources added.");
+        return;
+      }
+
+      pushUndoSnapshot();
+      const fromLibrary = Math.min(amount, gameState.voraxusLibrary);
+      gameState.voraxusLibrary -= fromLibrary;
+      gameState.voraxusTotalMana += amount;
+      const note = fromLibrary < amount
+        ? ` (only ${fromLibrary} came from the library — it was nearly empty)`
+        : "";
+      logMessage(
+        `${gameState.botName} searches its library and puts ${amount} mana source(s) onto the battlefield tapped${note}. ` +
+        `Now at ${gameState.voraxusCurrentMana}/${gameState.voraxusTotalMana}, ${gameState.voraxusLibrary} left in library. ` +
+        `They become available at its next untap step.`
+      );
+      updateStatus();
+    }
+
+    /** Adds temporary mana for this turn only — rituals, treasure, and
+        anything else that produces mana without adding a source. It
+        raises available mana without raising total capacity, so it can
+        legitimately push Voraxus above its usual ceiling, and it washes
+        out at the start of its next turn when mana resets to total. */
+    async function handleAddTemporaryMana() {
+      const amount = await showNumberPrompt(
+        `How much temporary mana does ${gameState.botName} gain this turn?`,
+        { min: 1, defaultValue: 1 }
+      );
+      if (amount === null || isNaN(amount) || amount <= 0) {
+        logMessage("No mana added.");
+        return;
+      }
+
+      pushUndoSnapshot();
+      gameState.voraxusCurrentMana += amount;
+      logMessage(
+        `${gameState.botName} gains ${amount} mana for this turn. ` +
+        `Now at ${gameState.voraxusCurrentMana}/${gameState.voraxusTotalMana}.`
+      );
       updateStatus();
     }
 
@@ -4856,6 +5242,12 @@
         summonedThisTurn: true,
         hasHaste: abilities.includes("Haste"),
         attackTarget: null,
+        tapped: false,
+        stunCounters: 0,
+        // Added by hand for the table's own effects, so it's a token:
+        // when it leaves the battlefield it ceases to exist rather
+        // than being filed in the graveyard.
+        isToken: true,
         description,
         abilities,
         colors: [],
@@ -4879,7 +5271,26 @@
       const creature = gameState.creatures.find(c => c.id === id);
       if (!creature) return;
 
-      const choice = await showRemovalDialog(`What happens to ${creature.description}?`);
+      // Already phased out or temporarily exiled: the only useful thing
+      // to do is bring it back, so skip the full dialog.
+      if (creature.zoneState) {
+        const label = creature.zoneState === "phased" ? "phased out" : "exiled";
+        const ok = await showConfirmDialog(
+          `${creature.description} is ${label}. Return it to the battlefield?`,
+          { confirmLabel: "Return", cancelLabel: "Leave it" }
+        );
+        if (!ok) return;
+        pushUndoSnapshot();
+        restorePermanentState(creature, true);
+        updateStatus();
+        return;
+      }
+
+      const choice = await showRemovalDialog(`What happens to ${creature.description}?`, {
+        // Temporary exile does nothing distinct for a commander: it
+        // returns to the command zone either way (rule 903.9).
+        hideTempExile: !!creature.isCommander
+      });
       if (choice === "cancel") return;
 
       pushUndoSnapshot();
@@ -4898,6 +5309,23 @@
           `(${creature.stunCounters} total). It will skip its next ` +
           `${creature.stunCounters === 1 ? "untap step" : `${creature.stunCounters} untap steps`}.`
         );
+        updateStatus();
+        return;
+      }
+
+      // Phasing / temporary exile keep the permanent in the creature
+      // list rather than hiding it away, flagged so the card itself
+      // shows what's happened to it. Temporary exile is meaningless on
+      // the commander — rule 903.9 sends it to the command zone no
+      // matter what — so that option isn't offered for it.
+      if (choice === "phase" || choice === "exiletemp") {
+        if (choice === "exiletemp" && creature.isCommander) return;
+        creature.zoneState = choice === "phase" ? "phased" : "exiled";
+        creature.attackTarget = null;
+        logMessage(choice === "phase"
+          ? `${creature.description} phases out. It phases back in automatically at the start of Voraxus's next turn.`
+          : `${creature.description} is exiled temporarily. Tap it to return it when the condition is met.`);
+        firePermanentTrigger("creatureLeaves", 1);
         updateStatus();
         return;
       }
@@ -4933,7 +5361,11 @@
         gameState.voraxusCards++;
         logMessage(`${creature.description} was returned to ${gameState.botName}'s hand.`);
       } else {
-        logMessage(`${creature.description} removed from the battlefield.`);
+        // Destroyed or exiled: the card is filed in the matching zone.
+        // Tokens are the exception — filePermanent skips those, since a
+        // token that leaves the battlefield simply ceases to exist.
+        filePermanent(creatureZoneEntry(creature), choice === "exile" ? "exile" : "graveyard");
+        logMessage(`${creature.description} ${choice === "exile" ? "is exiled" : "is destroyed"}.`);
       }
       // A bounce still counts as leaving the battlefield, so Soul
       // Furnace and friends trigger either way.
@@ -4950,11 +5382,35 @@
       const permanent = gameState.artifactsAndEnchantments.find(p => p.id === id);
       if (!permanent) return;
 
+      if (permanent.zoneState) {
+        const label = permanent.zoneState === "phased" ? "phased out" : "exiled";
+        const ok = await showConfirmDialog(
+          `${permanent.name} is ${label}. Return it to the battlefield?`,
+          { confirmLabel: "Return", cancelLabel: "Leave it" }
+        );
+        if (!ok) return;
+        pushUndoSnapshot();
+        permanent.zoneState = null;
+        logMessage(`${permanent.name} returns to the battlefield.`);
+        updateStatus();
+        return;
+      }
+
       const choice = await showRemovalDialog(`What happens to ${permanent.name}?`);
       if (choice === "cancel") return;
 
       pushUndoSnapshot();
       gameState.artifactsAndEnchantments = gameState.artifactsAndEnchantments.filter(p => p.id !== id);
+
+      if (choice === "phase" || choice === "exiletemp") {
+        permanent.zoneState = choice === "phase" ? "phased" : "exiled";
+        gameState.artifactsAndEnchantments.push(permanent);
+        logMessage(choice === "phase"
+          ? `${permanent.name} phases out, and phases back in at the start of Voraxus's next turn.`
+          : `${permanent.name} is exiled temporarily. Tap it to return it.`);
+        updateStatus();
+        return;
+      }
 
       if (choice === "bounce") {
         gameState.bouncedCards.push({
@@ -4965,7 +5421,9 @@
         gameState.voraxusCards++;
         logMessage(`${permanent.name} was returned to ${gameState.botName}'s hand.`);
       } else {
-        logMessage(`${permanent.name} removed from the battlefield.`);
+        filePermanent({ name: permanent.name, kind: permanent.type },
+                      choice === "exile" ? "exile" : "graveyard");
+        logMessage(`${permanent.name} ${choice === "exile" ? "is exiled" : "is destroyed"}.`);
       }
       updateStatus();
     }
@@ -5068,6 +5526,28 @@
         action pool. A pass/fail roll first (see
         COUNTER_BASE_CHANCE_BY_DIFFICULTY), and only on a pass does the
         mana-cost tier get rolled. */
+    /* How likely a non-counter response is, relative to a counter. The
+       counter rate itself is left exactly as tuned; these other
+       instant-speed plays are layered ON TOP rather than carved out of
+       it, so adding them made Voraxus interact more without making its
+       counters any rarer than before. */
+    const OTHER_RESPONSE_RATIO = 1.2;
+
+    /** The instant-speed plays Voraxus can make on someone else's turn,
+        other than countering. Weights are shaped by its colours using
+        the same affinity multipliers as its main-phase actions, so a
+        Blue Voraxus bounces and a Red one burns. */
+    function responseActionWeights(affinity) {
+      return {
+        RD: 20 * affinity.B,          // destroy target creature
+        RE: 12 * affinity.E,          // exile target creature
+        RF: 20 * affinity.F,          // damage, split between creature and player below
+        RJ: 18 * affinity.creature,   // flash in a creature
+        RO: 18,                       // pump one of its own creatures
+        RB: 12 * affinity.D           // bounce target permanent
+      };
+    }
+
     function handleCheckResponse() {
       if (gameState.voraxusCards <= 0) {
         logVoraxusAction(`${gameState.botName} has no response.`);
@@ -5078,21 +5558,113 @@
       const baseChance = COUNTER_BASE_CHANCE_BY_DIFFICULTY[gameState.difficultyMode] || COUNTER_BASE_CHANCE_BY_DIFFICULTY[2];
       // Three factors stack here: difficulty, table size, and Voraxus's
       // own colour leaning toward (or away from) counterspells.
-      const chance = baseChance
+      const counterChance = baseChance
         * counterScaleForPlayers(gameState.numPlayers)
         * (affinity.H != null ? affinity.H : 1);
+      const otherChance = counterChance * OTHER_RESPONSE_RATIO;
 
-      if (Math.random() >= chance) {
+      const roll = Math.random();
+      if (roll < counterChance) {
+        const manaCost = pickCounterManaCost();
+        pushUndoSnapshot();
+        if (!checkAndDeductMana(manaCost)) return;
+        spendCard("H");
+        resolveResponse("H");
+        logVoraxusAction(`${gameState.botName} counters target spell or activated ability. (${manaCost} mana, 1 card)`);
+        return;
+      }
+      if (roll >= counterChance + otherChance) {
         logVoraxusAction(`${gameState.botName} has no response.`);
         return;
       }
 
-      const manaCost = pickCounterManaCost();
+      performResponseAction(affinity);
+    }
+
+    /** Tallies a response and gives it the same roar and shake as any
+        other action Voraxus actually takes. */
+    function resolveResponse(key) {
+      gameState.actionTally[key] = (gameState.actionTally[key] || 0) + 1;
+      playMonsterRoar();
+      triggerScreenShake();
+      updateStatus();
+    }
+
+    /** Picks and resolves one non-counter instant-speed response. */
+    function performResponseAction(affinity) {
+      const branch = weightedPick(responseActionWeights(affinity));
+      const player = randomInt(gameState.numPlayers) + 1;
+      let manaCost = 0;
+      let message = "";
+
+      if (branch === "RD") {
+        manaCost = 3;
+        const type = pickPermanentType();
+        message = `${gameState.botName} destroys target ${type} controlled by Player ${player}.`;
+      } else if (branch === "RE") {
+        manaCost = 4;
+        const type = pickPermanentType();
+        message = `${gameState.botName} exiles target ${type} controlled by Player ${player}.`;
+      } else if (branch === "RF") {
+        const dmg = randomInt(5) + 1;
+        manaCost = dmg;
+        // Split between hitting a permanent and going at a player's face.
+        if (Math.random() < 0.55) {
+          const target = weightedPick({ creature: 7, planeswalker: 3 });
+          message = `${gameState.botName} deals ${dmg} damage to target ${target} controlled by Player ${player}.`;
+        } else {
+          message = `${gameState.botName} deals ${dmg} damage to Player ${player}.`;
+        }
+      } else if (branch === "RJ") {
+        const rolled = rollCreature("small");
+        manaCost = Math.floor((rolled.power + rolled.toughness) / 2) + 1; // flash costs a touch more
+        if (!checkAndDeductMana(manaCost)) {
+          logVoraxusAction(`${gameState.botName} has no response.`);
+          return;
+        }
+        spendCard(branch);
+        addCreatureToBattlefield(rolled, manaCost);
+        resolveResponse(branch);
+        logVoraxusAction(
+          `${gameState.botName} flashes in a ${rolled.power}/${rolled.toughness} creature with ` +
+          `${joinAbilitiesForDisplay(rolled.abilities)}.`
+        );
+        return;
+      } else if (branch === "RO") {
+        if (gameState.creatures.length === 0) {
+          logVoraxusAction(`${gameState.botName} has no response.`);
+          return;
+        }
+        manaCost = 2;
+        if (!checkAndDeductMana(manaCost)) {
+          logVoraxusAction(`${gameState.botName} has no response.`);
+          return;
+        }
+        const target = pickRandom(gameState.creatures);
+        const boost = randomInt(3) + 1;
+        target.power += boost;
+        target.toughness += boost;
+        target.description = target.description.replace(/^\d+\/\d+/, `${target.power}/${target.toughness}`);
+        spendCard(branch);
+        resolveResponse(branch);
+        logVoraxusAction(
+          `${gameState.botName} puts +${boost}/+${boost} on ${target.description} in response.`
+        );
+        return;
+      } else if (branch === "RB") {
+        manaCost = 2;
+        const type = pickPermanentType();
+        message = `${gameState.botName} returns target ${type} controlled by Player ${player} to its owner's hand.`;
+      }
+
       pushUndoSnapshot();
-      if (!checkAndDeductMana(manaCost)) return;
-      spendCard();
-      gameState.actionTally.H = (gameState.actionTally.H || 0) + 1;
-      logVoraxusAction(`${gameState.botName} counters target spell or activated ability. (${manaCost} mana, 1 card)`);
+      if (!checkAndDeductMana(manaCost)) {
+        logVoraxusAction(`${gameState.botName} has no response.`);
+        return;
+      }
+      spendCard(branch);
+      resolveResponse(branch);
+      logVoraxusAction(message);
     }
 
     /* ------------------------------------------------------------------
@@ -5108,28 +5680,20 @@
       if (includeAll) {
         container.appendChild(createButton("Apply Combat Damage", handleDamage));
       }
-      container.appendChild(createButton("Apply Direct Damage", handleDirectDamage));
+      const btnLife = createButton("Voraxus' Life \u25B8", showLifeSubmenu);
+      btnLife.title = "Direct damage, life loss, and life gain.";
+      container.appendChild(btnLife);
 
-      btnForceDiscardRef = createButton("Force Discard", handleDiscardFromVoraxus);
-      container.appendChild(btnForceDiscardRef);
+      // The mana, card and life effects live in their own submenus
+      // rather than crowding this row — most turns use none of them.
+      // Combat damage stays out here, since it's used every turn.
+      const btnMana = createButton("Voraxus' Mana \u25B8", showManaSubmenu);
+      btnMana.title = "Add, remove, or destroy Voraxus's mana.";
+      container.appendChild(btnMana);
 
-      container.appendChild(createButton("Force Draw", handleDrawFromVoraxus));
-
-      btnRemoveManaRef = createButton("Remove Mana", handleRemoveMana);
-      container.appendChild(btnRemoveManaRef);
-
-      btnRemoveManaSourceRef = createButton("Destroy Mana Source", handleRemoveManaSource);
-      btnRemoveManaSourceRef.title = "Permanently reduces Voraxus's total mana, like destroying its lands.";
-      container.appendChild(btnRemoveManaSourceRef);
-
-      // Only offered when the difficulty actually imposes a hand limit.
-      // At difficulties 4-5 Voraxus has no maximum hand size at all, so
-      // there's nothing for this to modify and the button is omitted.
-      if (!difficultyHasNoHandLimit()) {
-        const btnMaxHand = createButton("Set Max Hand Size", handleSetMaxHandSize);
-        btnMaxHand.title = "For spells that change maximum hand size. Applies at the end of Voraxus's turn.";
-        container.appendChild(btnMaxHand);
-      }
+      const btnCards = createButton("Voraxus' Hand \u25B8", showHandSubmenu);
+      btnCards.title = "Make Voraxus draw or discard, or change its maximum hand size.";
+      container.appendChild(btnCards);
 
       container.appendChild(createButton("Give Voraxus a Creature", handleGiveCreature));
 
@@ -5141,11 +5705,122 @@
       return container;
     }
 
+    /** Rebuilds whatever action menu was on screen before a submenu was
+        opened. Stored as a function rather than a flag because the two
+        menus differ by more than their buttons — Voraxus's own turn also
+        carries the Continue button, which a flag alone would lose. */
+    let restoreActionsMenu = () => {
+      actionsBox.innerHTML = "";
+      actionsBox.appendChild(createOpponentsButtons(true));
+    };
+
+    /** Swaps the action row for a submenu: a heading, the submenu's own
+        buttons, and a Back button. */
+    function showSubmenu(title, buildButtons) {
+      actionsBox.innerHTML = "";
+      const wrap = document.createElement("div");
+
+      const heading = document.createElement("div");
+      heading.className = "submenu-title";
+      heading.textContent = title;
+      wrap.appendChild(heading);
+
+      buildButtons(wrap);
+
+      const back = createButton("\u25C2 Back", () => restoreActionsMenu());
+      wrap.appendChild(back);
+
+      actionsBox.appendChild(wrap);
+      refreshActionButtonStates();
+    }
+
+    function showLifeSubmenu() {
+      showSubmenu("Voraxus' Life", wrap => {
+        const btnDamage = createButton("Direct Damage / Life Loss", handleDirectDamage);
+        btnDamage.title = "Non-combat damage and life loss — applied in full, unlike combat damage.";
+        wrap.appendChild(btnDamage);
+
+        const btnGain = createButton("Life Gain", handleGiveLife);
+        btnGain.title = "For effects that give Voraxus life.";
+        wrap.appendChild(btnGain);
+
+        const btnSet = createButton("Set Life Total", handleSetLife);
+        btnSet.title = "For effects that set a life total outright.";
+        wrap.appendChild(btnSet);
+      });
+    }
+
+    function showManaSubmenu() {
+      showSubmenu("Voraxus' Mana", wrap => {
+        const btnAddSource = createButton("Add Mana Source (enters tapped)", handleAddManaSource);
+        btnAddSource.title = "Voraxus searches its library for lands. They enter tapped, so its total rises but not this turn\u0027s available mana.";
+        wrap.appendChild(btnAddSource);
+
+        const btnAddTemp = createButton("Add Mana (this turn only)", handleAddTemporaryMana);
+        btnAddTemp.title = "Rituals and treasure — raises available mana without raising its total.";
+        wrap.appendChild(btnAddTemp);
+
+        btnRemoveManaRef = createButton("Remove Mana (this turn)", handleRemoveMana);
+        btnRemoveManaRef.title = "Drains mana Voraxus has available right now.";
+        wrap.appendChild(btnRemoveManaRef);
+
+        btnRemoveManaSourceRef = createButton("Destroy Mana Source", handleRemoveManaSource);
+        btnRemoveManaSourceRef.title = "Permanently reduces Voraxus's total mana, like destroying its lands.";
+        wrap.appendChild(btnRemoveManaSourceRef);
+      });
+    }
+
+    function showHandSubmenu() {
+      showSubmenu("Voraxus' Hand", wrap => {
+        wrap.appendChild(createButton("Force Draw", handleDrawFromVoraxus));
+
+        btnForceDiscardRef = createButton("Force Discard", handleDiscardFromVoraxus);
+        wrap.appendChild(btnForceDiscardRef);
+
+        // Only offered when the difficulty actually imposes a hand limit.
+        // At difficulty 5 Voraxus has no maximum hand size at all, so
+        // there's nothing for this to modify and the button is omitted.
+        if (!difficultyHasNoHandLimit()) {
+          const btnMaxHand = createButton("Set Max Hand Size", handleSetMaxHandSize);
+          btnMaxHand.title = "For spells that change maximum hand size. Applies at the end of Voraxus's turn.";
+          wrap.appendChild(btnMaxHand);
+        }
+      });
+    }
+
+    /** Lifelink on Voraxus's attackers. Rule 702.15b ties the life gain
+        to damage dealt, and an attacking creature deals damage equal to
+        its power, so that's what's counted here.
+
+        This fires as combat ends, just before post-combat actions, and
+        it optimistically assumes every attacker connects — the app
+        can't know what was blocked or killed first. If an attacker died
+        or was blocked before dealing damage, subtract that life by hand
+        with "Voraxus' Life → Direct Damage / Life Loss". */
+    function applyLifelinkGain() {
+      const linkers = gameState.creatures.filter(c =>
+        c.attackTarget != null && (c.abilities || []).includes("Lifelink"));
+      if (linkers.length === 0) return;
+
+      const total = linkers.reduce((sum, c) => sum + c.power, 0);
+      gameState.voraxusLife += total;
+      pushLifeHistory();
+      const detail = linkers.map(c => `${c.power}/${c.toughness}`).join(", ");
+      logMessage(
+        `<b>Lifelink:</b> ${gameState.botName} gains ${total} life from ${linkers.length} ` +
+        `attacking creature${linkers.length === 1 ? "" : "s"} (${detail}), and now has ${gameState.voraxusLife}. ` +
+        `Subtract any that were blocked or killed before damage.`
+      );
+    }
+
     function handleOpponentsTurn() {
       gameState.isVoraxusTurn = false;
       updateStatus();
-      actionsBox.innerHTML = "";
-      actionsBox.appendChild(createOpponentsButtons(true));
+      restoreActionsMenu = () => {
+        actionsBox.innerHTML = "";
+        actionsBox.appendChild(createOpponentsButtons(true));
+      };
+      restoreActionsMenu();
     }
 
     /* ------------------------------------------------------------------
@@ -5158,6 +5833,9 @@
       // Untap step first, exactly as in a real turn: everything that
       // tapped to attack last combat is available again.
       untapAllCreatures();
+      // Phased permanents return on their own, like stun counters
+      // ticking down — see phaseInAtUntap().
+      phaseInAtUntap();
       gameState.voraxusTotalMana++;
       gameState.voraxusCurrentMana = gameState.voraxusTotalMana;
       if (!drawVoraxusCards(1)) {
@@ -5191,6 +5869,7 @@
           logMessage("<b>Voraxus goes to combat.</b>");
           assignAttackTargets();
           logAttackAssignments();
+          applyLifelinkGain();
           updateStatus();
           phase = "post";
         } else if (phase === "post") {
@@ -5215,10 +5894,14 @@
         }
       };
 
-      const turnControls = document.createElement("div");
-      turnControls.appendChild(continueButton);
-      turnControls.appendChild(createOpponentsButtons(false));
-      actionsBox.appendChild(turnControls);
+      restoreActionsMenu = () => {
+        actionsBox.innerHTML = "";
+        const turnControls = document.createElement("div");
+        turnControls.appendChild(continueButton);
+        turnControls.appendChild(createOpponentsButtons(false));
+        actionsBox.appendChild(turnControls);
+      };
+      restoreActionsMenu();
     }
 
     /* ------------------------------------------------------------------
@@ -5251,6 +5934,7 @@
       setUpMusicToggle();
       setUpVolumeSlider();
       setUpStatsDialog();
+      setUpZoneDialog();
       setUpPayDecisionButton();
 
       configBox = document.getElementById("configBox");
@@ -5279,6 +5963,9 @@
       removalDialogMessage = document.getElementById("removalDialogMessage");
       removalBounceBtn = document.getElementById("removalBounceBtn");
       removalDestroyBtn = document.getElementById("removalDestroyBtn");
+      removalExileBtn = document.getElementById("removalExileBtn");
+      removalPhaseBtn = document.getElementById("removalPhaseBtn");
+      removalExileTempBtn = document.getElementById("removalExileTempBtn");
       removalStunBtn = document.getElementById("removalStunBtn");
       removalCancelBtn = document.getElementById("removalCancelBtn");
 
@@ -5320,6 +6007,7 @@
       }
     };
   </script>
+
 
   <script>
     /* Offline support, only when hosted as an installable app. It's
