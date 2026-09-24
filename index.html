@@ -649,6 +649,51 @@
       border-bottom: 1px dotted var(--accent-gold);
     }
 
+    /* Opponent life rows: name, steppers, and the total in the middle
+       so the eye lands on the number rather than the buttons. */
+    .life-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--button-bg);
+    }
+
+    .life-row:last-child {
+      border-bottom: none;
+    }
+
+    .life-name {
+      flex: 1 1 auto;
+      text-align: left;
+      font-size: 0.9em;
+    }
+
+    .life-total {
+      flex: 0 0 auto;
+      min-width: 2.4em;
+      text-align: center;
+      font-size: 1.15em;
+      font-weight: bold;
+      font-family: var(--font-display);
+    }
+
+    /* A player at zero or less is out — greyed and struck through so a
+       dead seat is obvious at a glance. */
+    .life-total.dead {
+      opacity: 0.5;
+      text-decoration: line-through;
+    }
+
+    .life-step {
+      flex: 0 0 auto;
+      min-width: 2.6em;
+      min-height: 34px;
+      padding: 2px 6px;
+      font-size: 0.85em;
+    }
+
     #zoneDialog {
       max-height: 80vh;
       overflow-y: auto;
@@ -1145,6 +1190,7 @@
     <label for="musicVolumeSlider" class="sr-only">Music Volume</label>
     <input type="range" id="musicVolumeSlider" min="0" max="100" value="80" aria-label="Music Volume" />
     <button id="statsBtn" class="button" type="button">&#128202; Stats</button>
+    <button id="lifeCounterBtn" class="button" type="button" title="Track the other players' life totals">&#10084; Life</button>
     <button id="payDecisionBtn" class="button" type="button" title="Randomly decide whether Voraxus pays an optional cost">&#128176; Pay?</button>
   </div>
 
@@ -1212,6 +1258,29 @@
       <button type="button" class="button" id="removalExileTempBtn">Exile temporarily (returns reset)</button>
       <button type="button" class="button" id="removalStunBtn">Add stun counter</button>
       <button type="button" class="button" id="removalCancelBtn">Cancel</button>
+    </div>
+  </dialog>
+
+  <!-- The other players' life totals. Voraxus's own is already in the
+       status bar, so it isn't repeated here. -->
+  <dialog id="lifeDialog" class="game-dialog" aria-label="Opponent life totals">
+    <h2>Player Life</h2>
+    <div id="lifeDialogList"></div>
+    <div class="dialog-buttons">
+      <button type="button" class="button" id="lifeResetBtn">Reset all</button>
+      <button type="button" class="button button-accent" id="lifeCloseBtn">Close</button>
+    </div>
+  </dialog>
+
+  <!-- Where a returned permanent actually goes. Kept as a second step
+       so the main permanent dialog doesn't become a wall of buttons. -->
+  <dialog id="returnDialog" class="game-dialog" aria-label="Return destination">
+    <p id="returnDialogMessage"></p>
+    <div class="dialog-buttons dialog-buttons-stacked">
+      <button type="button" class="button button-accent" id="returnHandBtn">To its hand</button>
+      <button type="button" class="button" id="returnTopBtn">Top of library</button>
+      <button type="button" class="button" id="returnBottomBtn">Bottom of library</button>
+      <button type="button" class="button" id="returnCancelBtn">Cancel</button>
     </div>
   </dialog>
 
@@ -2401,6 +2470,8 @@
       bouncedCards: [],
       graveyard: [],
       exileZone: [],
+      libraryTop: [],
+      opponentLife: [],
       commander: null,
       maxHandSizeOverride: null,
       voraxusColors: [],
@@ -2986,6 +3057,7 @@
     let numberDialog, numberDialogMessage, numberDialogInput;
     let numberDialogMinus, numberDialogPlus, numberDialogCancel, numberDialogOk;
     let confirmDialog, confirmDialogMessage, confirmCancelBtn, confirmOkBtn;
+    let returnDialog, returnDialogMessage, returnHandBtn, returnTopBtn, returnBottomBtn, returnCancelBtn;
     let removalDialog, removalDialogMessage, removalBounceBtn, removalDestroyBtn, removalExileBtn, removalPhaseBtn, removalExileTempBtn, removalStunBtn, removalCancelBtn;
     let giveCreatureDialog, giveCreaturePower, giveCreatureToughness, giveCreatureAbility, giveCreatureType;
     let giveCreatureCancelBtn, giveCreatureOkBtn;
@@ -3138,6 +3210,47 @@
 
         confirmDialog.showModal();
       });
+    }
+
+    /** Asks where a returned permanent goes. Resolves to "hand",
+        "top", "bottom" or "cancel". */
+    function showReturnDialog(name) {
+      return new Promise(resolve => {
+        returnDialogMessage.textContent = `Where does ${name} go?`;
+
+        function onClose() {
+          returnDialog.removeEventListener("close", onClose);
+          const v = returnDialog.returnValue;
+          resolve(["hand", "top", "bottom"].includes(v) ? v : "cancel");
+        }
+
+        returnDialog.addEventListener("close", onClose);
+        returnHandBtn.onclick = () => returnDialog.close("hand");
+        returnTopBtn.onclick = () => returnDialog.close("top");
+        returnBottomBtn.onclick = () => returnDialog.close("bottom");
+        returnCancelBtn.onclick = () => returnDialog.close("cancel");
+
+        returnDialog.showModal();
+      });
+    }
+
+    /** Files a returned permanent in the chosen place. "hand" keeps it
+        immediately recastable; "top" puts it back one draw away; and
+        "bottom" is effectively out of the game, since the library is
+        far deeper than a game lasts. All three put the card back into
+        the library count where applicable. */
+    function sendReturnedCard(entry, destination, label) {
+      if (destination === "hand") {
+        gameState.bouncedCards.push(entry);
+        gameState.voraxusCards++;
+        return `${label} is returned to ${gameState.botName}'s hand.`;
+      }
+      gameState.voraxusLibrary++;
+      if (destination === "top") {
+        gameState.libraryTop.push(entry);
+        return `${label} is put on top of ${gameState.botName}'s library — it draws it again next turn.`;
+      }
+      return `${label} is put on the bottom of ${gameState.botName}'s library.`;
     }
 
     /** Three-way version of showConfirmDialog, for deciding what an
@@ -3353,6 +3466,68 @@
       if (returning.length > 0) {
         logMessage(`${returning.length} phased permanent${returning.length === 1 ? "" : "s"} phase${returning.length === 1 ? "s" : ""} back in.`);
       }
+    }
+
+    /* Commander starts everyone at 40 (rule 903.7). Voraxus's own total
+       is tracked in the status bar, so only the other seats appear here. */
+    const OPPONENT_STARTING_LIFE = 40;
+
+    function makeOpponentLife(numPlayers) {
+      const n = Number.isInteger(numPlayers) && numPlayers > 0 ? numPlayers : 1;
+      return Array.from({ length: n }, () => OPPONENT_STARTING_LIFE);
+    }
+
+    /** Keeps the list the right length if the player count ever changes
+        mid-game, preserving whatever totals are already tracked. */
+    function syncOpponentLife() {
+      const n = Number.isInteger(gameState.numPlayers) && gameState.numPlayers > 0 ? gameState.numPlayers : 1;
+      if (!Array.isArray(gameState.opponentLife)) gameState.opponentLife = [];
+      while (gameState.opponentLife.length < n) gameState.opponentLife.push(OPPONENT_STARTING_LIFE);
+      gameState.opponentLife.length = n;
+    }
+
+    function renderLifeDialog() {
+      syncOpponentLife();
+      document.getElementById("lifeDialogList").innerHTML =
+        gameState.opponentLife.map((life, i) => `
+          <div class="life-row">
+            <span class="life-name">Player ${i + 1}</span>
+            <button type="button" class="button life-step" data-i="${i}" data-d="-5">&minus;5</button>
+            <button type="button" class="button life-step" data-i="${i}" data-d="-1">&minus;1</button>
+            <span class="life-total${life <= 0 ? " dead" : ""}">${life}</span>
+            <button type="button" class="button life-step" data-i="${i}" data-d="1">+1</button>
+            <button type="button" class="button life-step" data-i="${i}" data-d="5">+5</button>
+          </div>`).join("");
+    }
+
+    function showLifeDialog() {
+      renderLifeDialog();
+      document.getElementById("lifeDialog").showModal();
+    }
+
+    function setUpLifeDialog() {
+      document.getElementById("lifeCounterBtn").onclick = showLifeDialog;
+      document.getElementById("lifeCloseBtn").onclick =
+        () => document.getElementById("lifeDialog").close();
+
+      document.getElementById("lifeResetBtn").onclick = () => {
+        gameState.opponentLife = makeOpponentLife(gameState.numPlayers);
+        logMessage(`Player life totals reset to ${OPPONENT_STARTING_LIFE}.`);
+        renderLifeDialog();
+        saveGameState();
+      };
+
+      // Delegated, since the rows are rebuilt on every change.
+      document.getElementById("lifeDialogList").onclick = event => {
+        const btn = event.target.closest(".life-step");
+        if (!btn) return;
+        const i = parseInt(btn.dataset.i, 10);
+        const delta = parseInt(btn.dataset.d, 10);
+        if (!Number.isInteger(i) || !Number.isInteger(delta)) return;
+        gameState.opponentLife[i] += delta;
+        renderLifeDialog();
+        saveGameState();
+      };
     }
 
     function setUpZoneDialog() {
@@ -4279,6 +4454,8 @@
         gameState.bouncedCards = [];
         gameState.graveyard = [];
         gameState.exileZone = [];
+        gameState.libraryTop = [];
+        gameState.opponentLife = makeOpponentLife(gameState.numPlayers);
         gameState.maxHandSizeOverride = null;
         nextCreatureId = 1;
         nextPermanentId = 1;
@@ -4329,6 +4506,8 @@
         if (!Array.isArray(gameState.bouncedCards)) gameState.bouncedCards = [];
         if (!Array.isArray(gameState.graveyard)) gameState.graveyard = [];
         if (!Array.isArray(gameState.exileZone)) gameState.exileZone = [];
+        if (!Array.isArray(gameState.libraryTop)) gameState.libraryTop = [];
+        if (!Array.isArray(gameState.opponentLife)) gameState.opponentLife = makeOpponentLife(gameState.numPlayers);
         if (!gameState.commander) gameState.commander = buildCommander();
         if (gameState.maxHandSizeOverride === undefined) gameState.maxHandSizeOverride = null;
         recalculateNextCreatureId();
@@ -5001,6 +5180,15 @@
         gameState.voraxusLibrary--;
         gameState.voraxusCards++;
         drawn++;
+        // A card put on top of the library is the very next one drawn,
+        // and lands back in the recastable pool — so returning a
+        // permanent to the top only delays it by a turn, while the
+        // bottom buries it for the rest of the game.
+        if (gameState.libraryTop.length > 0) {
+          const back = gameState.libraryTop.pop();
+          gameState.bouncedCards.push(back);
+          logMessage(`${gameState.botName} draws ${back.label || "a card"} back off the top of its library.`);
+        }
       }
       // Blood Pact and anything else keyed to drawing — passed the count
       // so a 3-card draw drains three times, not once.
@@ -5293,6 +5481,14 @@
       });
       if (choice === "cancel") return;
 
+      // A returned permanent can go to hand, or to either end of the
+      // library — asked as a second step so the first dialog stays short.
+      let bounceDestination = "hand";
+      if (choice === "bounce" && !creature.isCommander) {
+        bounceDestination = await showReturnDialog(creature.description);
+        if (bounceDestination === "cancel") return;
+      }
+
       pushUndoSnapshot();
 
       // Stun counters don't remove the creature at all — rule 122.1d:
@@ -5343,11 +5539,12 @@
       gameState.voraxusCreatureCount = gameState.creatures.length;
 
       if (choice === "bounce") {
-        // Back to hand rather than gone: card count goes up, and the
-        // card itself is kept intact so Voraxus can recast this exact
-        // creature later for its original cost.
-        gameState.bouncedCards.push({
+        // The card itself is kept intact either way, so Voraxus can
+        // recast this exact creature for its original cost — the only
+        // question is how long until it gets the chance.
+        const entry = {
           kind: "creature",
+          label: creature.description,
           manaCost: creature.manaCost != null ? creature.manaCost : Math.floor((creature.power + creature.toughness) / 2),
           rolled: {
             power: creature.power,
@@ -5357,9 +5554,8 @@
             description: creature.description,
             sizeTier: creature.sizeTier || "small"
           }
-        });
-        gameState.voraxusCards++;
-        logMessage(`${creature.description} was returned to ${gameState.botName}'s hand.`);
+        };
+        logMessage(sendReturnedCard(entry, bounceDestination, creature.description));
       } else {
         // Destroyed or exiled: the card is filed in the matching zone.
         // Tokens are the exception — filePermanent skips those, since a
@@ -5399,6 +5595,12 @@
       const choice = await showRemovalDialog(`What happens to ${permanent.name}?`);
       if (choice === "cancel") return;
 
+      let bounceDestination = "hand";
+      if (choice === "bounce") {
+        bounceDestination = await showReturnDialog(permanent.name);
+        if (bounceDestination === "cancel") return;
+      }
+
       pushUndoSnapshot();
       gameState.artifactsAndEnchantments = gameState.artifactsAndEnchantments.filter(p => p.id !== id);
 
@@ -5413,13 +5615,13 @@
       }
 
       if (choice === "bounce") {
-        gameState.bouncedCards.push({
+        const entry = {
           kind: permanent.type,
           name: permanent.name,
+          label: permanent.name,
           manaCost: permanent.manaCost != null ? permanent.manaCost : 3
-        });
-        gameState.voraxusCards++;
-        logMessage(`${permanent.name} was returned to ${gameState.botName}'s hand.`);
+        };
+        logMessage(sendReturnedCard(entry, bounceDestination, permanent.name));
       } else {
         filePermanent({ name: permanent.name, kind: permanent.type },
                       choice === "exile" ? "exile" : "graveyard");
@@ -5935,6 +6137,7 @@
       setUpVolumeSlider();
       setUpStatsDialog();
       setUpZoneDialog();
+      setUpLifeDialog();
       setUpPayDecisionButton();
 
       configBox = document.getElementById("configBox");
@@ -5959,6 +6162,12 @@
       confirmDialogMessage = document.getElementById("confirmDialogMessage");
       confirmCancelBtn = document.getElementById("confirmCancelBtn");
       confirmOkBtn = document.getElementById("confirmOkBtn");
+      returnDialog = document.getElementById("returnDialog");
+      returnDialogMessage = document.getElementById("returnDialogMessage");
+      returnHandBtn = document.getElementById("returnHandBtn");
+      returnTopBtn = document.getElementById("returnTopBtn");
+      returnBottomBtn = document.getElementById("returnBottomBtn");
+      returnCancelBtn = document.getElementById("returnCancelBtn");
       removalDialog = document.getElementById("removalDialog");
       removalDialogMessage = document.getElementById("removalDialogMessage");
       removalBounceBtn = document.getElementById("removalBounceBtn");
